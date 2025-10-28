@@ -1,0 +1,33 @@
+apiVersion: nico.homystack.com/v1alpha1
+kind: KubernetesCluster
+metadata:
+  name: home-prod
+  namespace: default
+spec:
+  # Control Plane configuration
+  controlPlane:
+    # Option 1: Explicit list of machines
+    machines: ["cp-01", "cp-02", "cp-03"]
+    # Option 2: Machine selector (if machines list is empty)
+    # machineSelector:
+    #   matchLabels:
+    #     role: "control-plane"
+    # count: 3
+
+  # Data Plane (Workers) configuration
+  dataPlane:
+    # Option 1: Explicit list of machines
+    # machines: ["worker-01", "worker-02", "worker-03"]
+    # Option 2: Machine selector
+    machineSelector:
+      matchLabels:
+        role: "worker"
+    count: 2
+
+  # Git repository with cluster flakes
+  gitRepo: "https://github.com/user/cluster-flakes.git"
+  configurationSubdir: "clusters/prod"
+
+  # Optional: credentials for private repository
+  # credentialsRef:
+  #   name: git-creds

@@ -1,0 +1,83 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nico-operator
+  namespace: nico-operator-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nico-operator
+rules:
+- apiGroups: ["nico.homystack.com"]
+  resources: ["kubernetesclusters"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["nico.homystack.com"]
+  resources: ["kubernetesclusters/status"]
+  verbs: ["get", "update", "patch"]
+- apiGroups: ["nio.homystack.com"]
+  resources: ["machines", "nixosconfigurations"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["nio.homystack.com"]
+  resources: ["machines/status", "nixosconfigurations/status"]
+  verbs: ["get", "update", "patch"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: nico-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: nico-operator
+subjects:
+- kind: ServiceAccount
+  name: nico-operator
+  namespace: nico-operator-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nico-operator
+  namespace: nico-operator-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nico-operator
+  template:
+    metadata:
+      labels:
+        app: nico-operator
+    spec:
+      serviceAccountName: nico-operator
+      containers:
+      - name: operator
+        image: nico-operator:latest
+        imagePullPolicy: IfNotPresent
+
+        env:
+        - name: KUBERNETES_SERVICE_HOST
+          value: "kubernetes.default.svc"
+        - name: KUBERNETES_SERVICE_PORT
+          value: "443"
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL

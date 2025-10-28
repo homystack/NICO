@@ -1,0 +1,141 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: kubernetesclusters.nico.homystack.com
+spec:
+  group: nico.homystack.com
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+    subresources:
+      status: {}
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            properties:
+              # Control Plane
+              controlPlane:
+                type: object
+                properties:
+                  machines:
+                    type: array
+                    items:
+                      type: string
+                    description: Explicit list of control plane machine names
+                  machineSelector:
+                    type: object
+                    properties:
+                      matchLabels:
+                        type: object
+                        additionalProperties:
+                          type: string
+                    description: Label selector for control plane machines
+                  count:
+                    type: integer
+                    minimum: 1
+                    description: Number of control plane machines to select (ignored if machines is specified)
+              # Data Plane (Workers)
+              dataPlane:
+                type: object
+                properties:
+                  machines:
+                    type: array
+                    items:
+                      type: string
+                    description: Explicit list of worker machine names
+                  machineSelector:
+                    type: object
+                    properties:
+                      matchLabels:
+                        type: object
+                        additionalProperties:
+                          type: string
+                    description: Label selector for worker machines
+                  count:
+                    type: integer
+                    minimum: 0
+                    description: Number of worker machines to select (ignored if machines is specified)
+              # Git repository with flakes
+              gitRepo:
+                type: string
+                description: Git repository URL containing Kubernetes cluster flakes
+              configurationSubdir:
+                type: string
+                description: Subdirectory within the repository where cluster configuration is located
+              # Optional: credentials for private repository
+              credentialsRef:
+                type: object
+                properties:
+                  name:
+                    type: string
+                description: Secret with token/SSH key for private repository access
+          status:
+            type: object
+            properties:
+              phase:
+                type: string
+                enum: ["Provisioning", "Ready", "Failed", "Deleting"]
+                description: Current phase of the cluster
+              controlPlaneReady:
+                type: string
+                description: Number of ready control plane nodes (e.g., "3/3")
+              dataPlaneReady:
+                type: string
+                description: Number of ready worker nodes (e.g., "5/5")
+              kubeconfigSecret:
+                type: string
+                description: Name of the secret containing kubeconfig
+              conditions:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    type:
+                      type: string
+                    status:
+                      type: string
+                    lastTransitionTime:
+                      type: string
+                      format: date-time
+                    reason:
+                      type: string
+                    message:
+                      type: string
+              appliedMachines:
+                type: object
+                additionalProperties:
+                  type: string
+                description: Map of machine names to their applied NixosConfiguration names
+    additionalPrinterColumns:
+      - name: Phase
+        type: string
+        description: Cluster phase
+        jsonPath: .status.phase
+      - name: Control Plane
+        type: string
+        description: Control plane readiness
+        jsonPath: .status.controlPlaneReady
+      - name: Data Plane
+        type: string
+        description: Data plane readiness
+        jsonPath: .status.dataPlaneReady
+      - name: Kubeconfig
+        type: string
+        description: Kubeconfig secret
+        jsonPath: .status.kubeconfigSecret
+      - name: Age
+        type: date
+        jsonPath: .metadata.creationTimestamp
+
+  scope: Namespaced
+  names:
+    plural: kubernetesclusters
+    singular: kubernetescluster
+    kind: KubernetesCluster
+    shortNames:
+    - k8scluster
+    - kcluster
