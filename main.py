@@ -3,9 +3,11 @@
 import kopf
 import logging
 import os
+from prometheus_client import start_http_server
 
 from kubernetescluster_handlers import reconcile_kubernetes_cluster, monitor_cluster_status
 from clients import update_cluster_status
+from metrics import init_metrics
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -40,6 +42,17 @@ async def unified_kubernetes_cluster_handler(body, spec, name, namespace, **kwar
 @kopf.on.startup()
 def configure(settings: kopf.OperatorSettings, **_):
     settings.posting.level = logging.WARNING
+
+    # Initialize Prometheus metrics
+    init_metrics()
+
+    # Start Prometheus metrics server
+    metrics_port = int(os.environ.get("METRICS_PORT", "8080"))
+    try:
+        start_http_server(metrics_port)
+        logger.info(f"Prometheus metrics server started on port {metrics_port}")
+    except Exception as e:
+        logger.warning(f"Failed to start metrics server: {e}")
 
 
 if __name__ == "__main__":

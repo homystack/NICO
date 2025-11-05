@@ -155,7 +155,7 @@ async def create_nixos_configuration(config_name: str, namespace: str, spec: Dic
             "metadata": {"name": config_name},
             "spec": spec,
         }
-        
+
         custom_objects_api.create_namespaced_custom_object(
             group="nio.homystack.com",
             version="v1alpha1",
@@ -164,6 +164,48 @@ async def create_nixos_configuration(config_name: str, namespace: str, spec: Dic
             body=body,
         )
         logger.info(f"Created NixosConfiguration: {config_name}")
+    except Exception as e:
+        logger.error(f"Failed to create NixosConfiguration {config_name}: {e}")
+        raise
+
+
+async def create_nixos_configuration_with_owner(
+    config_name: str, namespace: str, spec: Dict,
+    owner_name: str, owner_uid: str, role: str
+):
+    """Create NixosConfiguration resource with ownerReference for cascade deletion"""
+    try:
+        body = {
+            "apiVersion": "nio.homystack.com/v1alpha1",
+            "kind": "NixosConfiguration",
+            "metadata": {
+                "name": config_name,
+                "labels": {
+                    "nico.homystack.com/cluster": owner_name,
+                    "nico.homystack.com/role": role,
+                },
+                "ownerReferences": [
+                    {
+                        "apiVersion": "nico.homystack.com/v1alpha1",
+                        "kind": "KubernetesCluster",
+                        "name": owner_name,
+                        "uid": owner_uid,
+                        "controller": True,
+                        "blockOwnerDeletion": True,
+                    }
+                ],
+            },
+            "spec": spec,
+        }
+
+        custom_objects_api.create_namespaced_custom_object(
+            group="nio.homystack.com",
+            version="v1alpha1",
+            namespace=namespace,
+            plural="nixosconfigurations",
+            body=body,
+        )
+        logger.info(f"Created NixosConfiguration with owner: {config_name}")
     except Exception as e:
         logger.error(f"Failed to create NixosConfiguration {config_name}: {e}")
         raise

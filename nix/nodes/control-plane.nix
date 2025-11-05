@@ -1,23 +1,36 @@
-{ config, pkgs, node, nodeIndex, totalControlPlaneNodes, ... }:
+{ config, pkgs, lib, clusterConfig, node, nodeIndex, totalControlPlaneNodes, ... }:
 
 let
-  clusterConfig = import ../../cluster.nix;
+  # Read join-token from NICO-injected file (in configurationSubdir root)
+  joinTokenPath = ../join-token;
+  hasJoinToken = builtins.pathExists joinTokenPath;
+
+  # First control plane node initializes, others join
+  isFirstMaster = nodeIndex == 0;
+
+  # VIP from cluster config
+  vip = clusterConfig.vip or "192.168.1.100";
+
 in
 {
   # Keepalived configuration for VIP management
   services.keepalived = {
     enable = true;
-    vrrpInstances."k8s_vip" = {
-      state = if nodeIndex == 0 then "MASTER" else "BACKUP";
-      interface = "eth0"; # Adjust interface as needed
+    vrrpInstances.k8s_vip = {
+      state = if isFirstMaster then "MASTER" else "BACKUP";
+      interface = "eth0";
       virtualRouterId = 51;
-      priority = 150 - nodeIndex; # Higher priority for lower index (MASTER has highest)
-      advertInt = 1;
+      priority = 150 - nodeIndex; # First master has highest priority
+      advert_int = 1;
+
       authentication = {
-        authType = "PASS";
-        authPass = "k8s_secret"; # In production, use a secure password
+        auth_type = "PASS";
+        auth_pass = builtins.substring 0 8 (builtins.hashString "sha256" clusterConfig.name);
       };
-      virtualIpaddress = [ "${clusterConfig.vip}/24" ];
+
+      virtual_ipaddress = [
+        "${vip}/24"
+      ];
     };
   };
 
@@ -25,51 +38,89 @@ in
   services.k3s = {
     enable = true;
     role = "server";
-    
-    # For the first control plane node, initialize the cluster
-    # For others, join via VIP
-    serverAddr = if nodeIndex == 0 then "" else "https://${clusterConfig.vip}:6443";
-    tokenFile = "/var/lib/k3s/token";
-    
-    # Additional settings for HA
-    extraFlags = let
-      nodeIP = node.ip;
-    in
-      toString [
-        "--node-ip=${nodeIP}"
-        "--advertise-address=${nodeIP}"
-        "--tls-san=${clusterConfig.vip}"
-        "--cluster-init"  # Only for the first node, but k3s handles this
-      ];
+
+    # First master initializes, others join to VIP
+    serverAddr = if isFirstMaster then "" else "https://${vip}:6443";
+
+    # Token file location (will be created from injected join-token)
+    tokenFile = "/var/lib/rancher/k3s/server/token";
+
+    # K3s configuration
+    extraFlags = toString ([
+      "--node-ip=${node.ip}"
+      "--advertise-address=${node.ip}"
+      "--tls-san=${vip}"
+      "--tls-san=${node.name}"
+      "--tls-san=${node.ip}"
+      "--disable=traefik" # Disable default traefik, can be installed via Helm
+      "--write-kubeconfig-mode=644"
+    ] ++ lib.optionals isFirstMaster [
+      "--cluster-init" # Initialize embedded etcd cluster
+    ]);
   };
 
   # Ensure k3s starts after keepalived
   systemd.services.k3s = {
-    after = [ "keepalived.service" ];
-    requires = [ "keepalived.service" ];
+    after = [ "keepalived.service" "network-online.target" ];
+    wants = [ "keepalived.service" "network-online.target" ];
+
+    # Add delay for non-first masters to wait for VIP to be available
+    serviceConfig = lib.mkIf (!isFirstMaster) {
+      ExecStartPre = [
+        "${pkgs.coreutils}/bin/sleep 10"
+        "${pkgs.bash}/bin/bash -c 'until ${pkgs.curl}/bin/curl -k https://${vip}:6443/ping; do ${pkgs.coreutils}/bin/sleep 2; done'"
+      ];
+    };
   };
 
-  # Create token file for k3s (in production, this should be a secret)
-  system.activationScripts.k3s-token = {
+  # Setup k3s token from NICO-injected file
+  system.activationScripts.k3s-setup = lib.mkIf hasJoinToken {
     text = ''
-      mkdir -p /var/lib/k3s
-      echo "${clusterConfig.clusterToken}" > /var/lib/k3s/token
-      chmod 600 /var/lib/k3s/token
+      mkdir -p /var/lib/rancher/k3s/server
+
+      # Copy join token from injected file
+      if [ -f ${joinTokenPath} ]; then
+        cp ${joinTokenPath} /var/lib/rancher/k3s/server/token
+        chmod 600 /var/lib/rancher/k3s/server/token
+        echo "K3s token configured from NICO injection"
+      fi
     '';
+    deps = [];
   };
 
   # Additional firewall rules for control plane
   networking.firewall.allowedTCPPorts = [
-    6443  # Kubernetes API
+    6443  # Kubernetes API server
     2379  # etcd client
     2380  # etcd peer
-    10250 # Kubelet
-    10259 # kube-scheduler
-    10257 # kube-controller-manager
+    10250 # Kubelet metrics
+    10251 # kube-scheduler (deprecated but still used)
+    10252 # kube-controller-manager (deprecated but still used)
+    10257 # kube-controller-manager secure
+    10259 # kube-scheduler secure
   ];
 
-  # Monitoring and logging
+  networking.firewall.allowedUDPPorts = [
+    8472  # Flannel VXLAN
+  ];
+
+  # Logging configuration
   services.journald.extraConfig = ''
-    SystemMaxUse=1G
+    SystemMaxUse=2G
+    MaxRetentionSec=1week
   '';
+
+  # Additional packages for control plane
+  environment.systemPackages = with pkgs; [
+    k3s
+    kubectl
+    kubernetes-helm
+  ];
+
+  # Ensure directories exist
+  systemd.tmpfiles.rules = [
+    "d /var/lib/rancher 0755 root root -"
+    "d /var/lib/rancher/k3s 0755 root root -"
+    "d /var/lib/rancher/k3s/server 0755 root root -"
+  ];
 }

@@ -1,49 +1,90 @@
-{ config, pkgs, node, ... }:
+{ config, pkgs, lib, clusterConfig, node, ... }:
 
 let
-  clusterConfig = import ../../cluster.nix;
+  # Read join-token from NICO-injected file (in configurationSubdir root)
+  joinTokenPath = ../join-token;
+  hasJoinToken = builtins.pathExists joinTokenPath;
+
+  # VIP from cluster config
+  vip = clusterConfig.vip or "192.168.1.100";
+
 in
 {
   # K3s agent configuration for worker nodes
   services.k3s = {
     enable = true;
     role = "agent";
-    serverAddr = "https://${clusterConfig.vip}:6443";
-    tokenFile = "/var/lib/k3s/token";
-    
-    # Additional settings
-    extraFlags = let
-      nodeIP = node.ip;
-    in
-      toString [
-        "--node-ip=${nodeIP}"
-      ];
+
+    # Connect to control plane via VIP
+    serverAddr = "https://${vip}:6443";
+
+    # Token file location (will be created from injected join-token)
+    tokenFile = "/var/lib/rancher/k3s/agent/token";
+
+    # K3s agent configuration
+    extraFlags = toString [
+      "--node-ip=${node.ip}"
+    ];
   };
 
-  # Create token file for k3s
-  system.activationScripts.k3s-token = {
+  # Ensure k3s starts after network is online
+  systemd.services.k3s = {
+    after = [ "network-online.target" ];
+    wants = [ "network-online.target" ];
+
+    # Wait for control plane VIP to be available
+    serviceConfig = {
+      ExecStartPre = [
+        "${pkgs.coreutils}/bin/sleep 5"
+        "${pkgs.bash}/bin/bash -c 'until ${pkgs.curl}/bin/curl -k https://${vip}:6443/ping; do ${pkgs.coreutils}/bin/sleep 2; done'"
+      ];
+    };
+  };
+
+  # Setup k3s token from NICO-injected file
+  system.activationScripts.k3s-setup = lib.mkIf hasJoinToken {
     text = ''
-      mkdir -p /var/lib/k3s
-      echo "${clusterConfig.clusterToken}" > /var/lib/k3s/token
-      chmod 600 /var/lib/k3s/token
+      mkdir -p /var/lib/rancher/k3s/agent
+
+      # Copy join token from injected file
+      if [ -f ${joinTokenPath} ]; then
+        cp ${joinTokenPath} /var/lib/rancher/k3s/agent/token
+        chmod 600 /var/lib/rancher/k3s/agent/token
+        echo "K3s token configured from NICO injection"
+      fi
     '';
+    deps = [];
   };
 
   # Firewall rules for worker nodes
   networking.firewall.allowedTCPPorts = [
-    10250 # Kubelet
-    30000 # NodePort range start
-    32767 # NodePort range end
+    10250 # Kubelet metrics
+    30000 # NodePort range start (adjust as needed)
   ];
 
-  # Worker nodes don't need keepalived, but we ensure they have basic networking
-  networking.interfaces.eth0.ipv4.addresses = [{
-    address = node.ip;
-    prefixLength = 24;
-  }];
+  networking.firewall.allowedTCPPortRanges = [
+    { from = 30000; to = 32767; } # NodePort services
+  ];
 
-  # Worker-specific packages (optional)
+  networking.firewall.allowedUDPPorts = [
+    8472  # Flannel VXLAN
+  ];
+
+  # Additional packages for workers
   environment.systemPackages = with pkgs; [
-    nvidia-container-toolkit # if you have GPUs
+    k3s
   ];
+
+  # Ensure directories exist
+  systemd.tmpfiles.rules = [
+    "d /var/lib/rancher 0755 root root -"
+    "d /var/lib/rancher/k3s 0755 root root -"
+    "d /var/lib/rancher/k3s/agent 0755 root root -"
+  ];
+
+  # Logging configuration
+  services.journald.extraConfig = ''
+    SystemMaxUse=1G
+    MaxRetentionSec=1week
+  '';
 }
