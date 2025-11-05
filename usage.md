@@ -59,102 +59,54 @@ kubectl apply -f examples/kubernetescluster-example.yaml
 
 ## Machine Management
 
-### Machine Resource
+The `Machine` resource represents physical or virtual machines managed by the [NIO (NixOS Infrastructure Operator)](https://github.com/homystack/nio). NICO uses Machine resources to provision Kubernetes cluster nodes.
 
-The `Machine` resource represents a physical or virtual machine that can be managed by NICO.
+**For detailed Machine management documentation, see the [NIO repository](https://github.com/homystack/nio).**
 
-#### Example Machine Definition
+### Quick Example
 
 ```yaml
 apiVersion: nio.homystack.com/v1alpha1
 kind: Machine
 metadata:
   name: worker-01
-  namespace: default
+  labels:
+    role: worker  # Used by NICO for machine selection
 spec:
   hostname: worker-01.local
   ipAddress: 192.168.1.100
   sshUser: root
   sshKeySecretRef:
     name: machine-ssh-key
-    namespace: default
-  labels:
-    role: worker
-    environment: production
-```
-
-#### Machine Status
-
-Check machine status:
-```bash
-kubectl get machine worker-01 -o yaml
-```
-
-Expected status:
-```yaml
-status:
-  discoverable: true
-  hasConfiguration: true
-  appliedConfiguration: "worker-config"
-  appliedCommit: "a1b2c3d4e5f6..."
-  lastAppliedTime: "2025-01-21T08:30:00Z"
 ```
 
 ## Configuration Management
 
-### NixosConfiguration Resource
+The `NixosConfiguration` resource defines NixOS configurations applied to machines. This is managed by the [NIO (NixOS Infrastructure Operator)](https://github.com/homystack/nio). NICO automatically creates NixosConfiguration resources for cluster nodes.
 
-The `NixosConfiguration` resource defines NixOS configurations to be applied to machines.
+**For detailed NixosConfiguration documentation, see the [NIO repository](https://github.com/homystack/nio).**
 
-#### Example Configuration
+### Quick Example
 
 ```yaml
 apiVersion: nio.homystack.com/v1alpha1
 kind: NixosConfiguration
 metadata:
   name: worker-config
-  namespace: default
+  labels:
+    nico.homystack.com/cluster: "my-cluster"  # Added by NICO
+    nico.homystack.com/role: "worker"         # Added by NICO
 spec:
   gitRepo: "https://github.com/your-org/nixos-configs.git"
-  flake: ".#worker"
+  flake: ".#worker-01"
   configurationSubdir: "nix"
   fullInstall: false
   machineRef:
     name: worker-01
-  credentialsRef:
-    name: git-credentials
-  additionalFiles:
-    - path: "secrets/database-password"
-      value:
-        secretRef:
-          name: db-secret
-    - path: "config/custom.nix"
-      value:
-        inline: |
-          { config, pkgs, ... }:
-          {
-            services.postgresql.enable = true;
-          }
+  onRemoveFlake: "#minimal"  # Set by NICO for cleanup
 ```
 
-#### Configuration Modes
-
-1. **Full Installation** (`fullInstall: true`):
-   - Uses `nixos-anywhere --kexec`
-   - Complete OS reinstallation
-   - Suitable for initial setup
-
-2. **Update Mode** (`fullInstall: false`):
-   - Uses `nixos-rebuild switch --flake`
-   - Updates existing system
-   - Preserves data and state
-
-#### Configuration Status
-
-Check configuration status:
-```bash
-kubectl get nixosconfiguration worker-config -o yaml
-```
+**Note**: When using NICO for Kubernetes cluster management, you don't need to create NixosConfiguration resources manually - NICO creates them automatically based on your KubernetesCluster specification.
 
 ## Kubernetes Cluster Management
 
