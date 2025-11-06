@@ -2,25 +2,26 @@ version: '3.8'
 
 services:
 
-  # # Оператор в режиме разработки
+  # Оператор NICO в режиме разработки
+  nico:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: nico-dev
+    network_mode: host
+    volumes:
+      - .:/app
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ~/.kube/config:/app/.kube/config
+    environment:
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+      - PYDEVD_DISABLE_FILE_VALIDATION=1
+    ports:
+      - "5678:5678"  # Python debugger port
+    command: python -m debugpy --listen 0.0.0.0:5678 --wait-for-client main.py
 
-
-  # nico:
-  #   build:
-  #     context: .
-  #     dockerfile: Dockerfile
-  #   container_name: niсo-dev
-  #   network_mode: host
-  #   volumes:
-  #     - .:/app
-  #     - /var/run/docker.sock:/var/run/docker.sock
-  #     - ~/.kube/config:/app/.kube/config
-  #   environment:
-  #     - PYTHONPATH=/app
-  #     - PYTHONUNBUFFERED=1
-  #     - PYDEVD_DISABLE_FILE_VALIDATION=1 
-  #   ports:
-  #     - "5678:5678"  # Python debugger port
+  # Оператор NIO (базовая инфраструктура)
   nio:
     image: ghcr.io/homystack/nio:main
     container_name: nio-main
