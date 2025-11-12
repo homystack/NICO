@@ -40,6 +40,15 @@ RUN pip install --no-cache-dir -r requirements-dev.txt
 
 # In development mode, source code is mounted as volume
 # So we don't COPY it here
+# Copy only essential runtime files for NICO
+COPY main.py .
+COPY kubernetescluster_handlers.py .
+COPY clients.py .
+COPY utils.py .
+COPY events.py .
+COPY metrics.py .
+COPY scripts/ ./scripts/
+COPY crds/ ./crds/
 
 ENV KUBECONFIG=/app/.kube/config PYTHONUNBUFFERED=1 PYTHONPATH=/app
 

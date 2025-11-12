@@ -11,7 +11,7 @@ NC='\033[0m' # No Color
 # Configuration
 CLUSTER_NAME="nico-dev"
 KUBECONFIG_DIR="${HOME}/.kube"
-KUBECONFIG_FILE="${KUBECONFIG_DIR}/nico-dev.kubeconfig"
+KUBECONFIG_FILE="${KUBECONFIG_DIR}/config"
 KIND_VERSION="v0.20.0"
 
 echo -e "${GREEN}=== NICO Kind Cluster Setup ===${NC}"
@@ -61,6 +61,9 @@ if kind get clusters | grep -q "^${CLUSTER_NAME}$"; then
         echo -e "${YELLOW}Using existing cluster.${NC}"
         # Export kubeconfig for existing cluster
         kind export kubeconfig --name "${CLUSTER_NAME}" --kubeconfig "${KUBECONFIG_FILE}"
+
+        # Fix server address to use 127.0.0.1 instead of 0.0.0.0
+        sed -i 's|https://0.0.0.0:6443|https://127.0.0.1:6443|g' "${KUBECONFIG_FILE}"
         echo -e "${GREEN}✓ Kubeconfig exported to ${KUBECONFIG_FILE}${NC}"
 
         # Apply CRDs
@@ -112,6 +115,9 @@ echo -e "${GREEN}✓ Kind cluster created${NC}"
 echo -e "${YELLOW}Exporting kubeconfig...${NC}"
 mkdir -p "${KUBECONFIG_DIR}"
 kind export kubeconfig --name "${CLUSTER_NAME}" --kubeconfig "${KUBECONFIG_FILE}"
+
+# Fix server address to use 127.0.0.1 instead of 0.0.0.0
+sed -i 's|https://0.0.0.0:6443|https://127.0.0.1:6443|g' "${KUBECONFIG_FILE}"
 
 echo -e "${GREEN}✓ Kubeconfig saved to ${KUBECONFIG_FILE}${NC}"
 

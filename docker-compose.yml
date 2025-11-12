@@ -10,10 +10,9 @@ services:
     container_name: nico-dev
     network_mode: host
     volumes:
-      - .:/app
-      - /var/run/docker.sock:/var/run/docker.sock
       - ~/.kube/config:/app/.kube/config
     environment:
+      - METRICS_PORT=8002
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
       - PYDEVD_DISABLE_FILE_VALIDATION=1
@@ -23,30 +22,25 @@ services:
 
   # Оператор NIO (базовая инфраструктура)
   nio:
-    image: ghcr.io/homystack/nio:main
-    container_name: nio-main
+    image: nio-nio
     network_mode: host
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ~/.kube/config:/home/operator_user/.kube/config
+      - ~/.kube/config:/app/.kube/config
     environment:
+      - METRICS_PORT=8001
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
       - PYDEVD_DISABLE_FILE_VALIDATION=1 
-    ports:
-      - "5678:5678"  # Python debugger port
 
   # PXE сервер для загрузки машин через iPXE
   nio-ipxe:
-    image: ghcr.io/homystack/nio-ipxe:main
-    container_name: nio-ipxe-main
+    image: nio-nio-ipxe
     network_mode: host
     volumes:
       - .pxe:/app/.pxe
-      - ~/.kube/config:/root/.kube/config
+      - ~/.kube/config:/app/.kube/config
     environment:
-      - KUBECONFIG=/root/.kube/config
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
-    command: python ipxe.py
     privileged: true
+    command: ["python", "ipxe.py", "--interface", "eth0"]

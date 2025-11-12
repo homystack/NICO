@@ -8,11 +8,6 @@ RUN apt-get update && apt-get install -y \
 
 # Download Nix installer with checksum verification
 
-# Install kind
-ARG KIND_VERSION=v0.20.0
-RUN curl -Lo /usr/local/bin/kind https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64 \
-    && chmod +x /usr/local/bin/kind
-
 # Create user
 ARG USER_UID=1000
 ARG USER_GID=1000
@@ -47,6 +42,7 @@ COPY kubernetescluster_handlers.py .
 COPY clients.py .
 COPY utils.py .
 COPY events.py .
+COPY metrics.py .
 COPY scripts/ ./scripts/
 COPY crds/ ./crds/
 

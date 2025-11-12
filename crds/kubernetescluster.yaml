@@ -63,6 +63,9 @@ spec:
               gitRepo:
                 type: string
                 description: Git repository URL containing Kubernetes cluster flakes
+              ref:
+                type: string
+                description: Git reference (branch, tag, or commit SHA) to use. Defaults to the repository's default branch
               configurationSubdir:
                 type: string
                 description: Subdirectory within the repository where cluster configuration is located
@@ -110,6 +113,16 @@ spec:
                 additionalProperties:
                   type: string
                 description: Map of machine names to their applied NixosConfiguration names
+              selectedControlPlaneMachines:
+                type: array
+                items:
+                  type: string
+                description: Persisted list of selected control plane machines (ensures stable first CP node)
+              selectedDataPlaneMachines:
+                type: array
+                items:
+                  type: string
+                description: Persisted list of selected worker machines
     additionalPrinterColumns:
       - name: Phase
         type: string

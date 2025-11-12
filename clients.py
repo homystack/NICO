@@ -242,6 +242,33 @@ def get_nixos_configuration(config_name: str, namespace: str):
         raise
 
 
+async def patch_nixos_configuration_spec(
+    config_name: str, namespace: str, spec_updates: Dict
+):
+    """
+    Patch NixosConfiguration spec fields using JSON Merge Patch
+
+    This allows setting fields to null to remove them from the spec.
+    """
+    try:
+        body = {"spec": spec_updates}
+
+        # Use JSON Merge Patch content type to support field removal with null
+        custom_objects_api.patch_namespaced_custom_object(
+            group="nio.homystack.com",
+            version="v1alpha1",
+            namespace=namespace,
+            plural="nixosconfigurations",
+            name=config_name,
+            body=body,
+            content_type="application/merge-patch+json",
+        )
+        logger.info(f"Patched NixosConfiguration {config_name} spec: {list(spec_updates.keys())}")
+    except Exception as e:
+        logger.error(f"Failed to patch NixosConfiguration {config_name}: {e}")
+        raise
+
+
 async def update_cluster_status(
     cluster_name: str, namespace: str, status_updates: Dict
 ):

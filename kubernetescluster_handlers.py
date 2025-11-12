@@ -19,6 +19,7 @@ from clients import (
     create_nixos_configuration_with_owner,
     delete_nixos_configuration,
     get_nixos_configuration,
+    patch_nixos_configuration_spec,
 )
 
 from metrics import (
@@ -37,11 +38,18 @@ logger = logging.getLogger(__name__)
 
 
 async def select_machines_for_cluster(
-    cluster_spec: dict, namespace: str, role: str, cluster_name: str = ""
+    cluster_spec: dict, namespace: str, role: str, cluster_name: str = "",
+    current_status: dict = None
 ) -> List[str]:
     """
     Select machines for cluster role (controlPlane or dataPlane)
-    Priority: explicit machines list > machineSelector + count
+    Priority:
+    1. Explicit machines list from spec
+    2. Previously selected machines from status (preserves first control plane)
+    3. New selection via machineSelector + count
+
+    IMPORTANT: Once machines are selected, they are persisted in cluster status
+    to ensure the first control plane node never changes.
     """
     start_time = time.time()
 
@@ -54,11 +62,32 @@ async def select_machines_for_cluster(
             record_machines_selected(namespace, cluster_name, role, len(selected))
         return selected
 
+    # Check if we have previously selected machines in status
+    if current_status:
+        # Map role names to status field names
+        if role == "controlPlane":
+            status_key = "selectedControlPlaneMachines"
+        elif role == "dataPlane":
+            status_key = "selectedDataPlaneMachines"
+        else:
+            status_key = None
+
+        if status_key:
+            previously_selected = current_status.get(status_key, [])
+
+            # If we have previously selected machines, reuse them
+            # This ensures first control plane node never changes
+            if previously_selected:
+                logger.info(f"Reusing previously selected {role} machines: {previously_selected}")
+                if cluster_name:
+                    record_machines_selected(namespace, cluster_name, role, len(previously_selected))
+                return previously_selected
+
     # Otherwise use machineSelector and count
     machine_selector = role_spec.get("machineSelector", {})
     count = role_spec.get("count", 0)
 
-    if not machine_selector or count == 0:
+    if count == 0:
         return []
 
     # Get all machines in namespace
@@ -79,6 +108,9 @@ async def select_machines_for_cluster(
         if match and not machine.get("status", {}).get("hasConfiguration", True):
             selected_machines.append(machine["metadata"]["name"])
 
+    # Sort alphabetically for deterministic initial selection
+    selected_machines.sort()
+
     # Return up to count machines
     selected = selected_machines[:count]
 
@@ -90,6 +122,7 @@ async def select_machines_for_cluster(
         ).observe(duration)
         record_machines_selected(namespace, cluster_name, role, len(selected))
 
+    logger.info(f"Selected new {role} machines for cluster {cluster_name}: {selected}")
     return selected
 
 
@@ -149,22 +182,36 @@ def generate_cluster_config(
 async def create_join_token_secret(
     cluster_name: str, namespace: str
 ) -> str:
-    """Create a secret with join token for cluster nodes"""
+    """Create a secret with join token for cluster nodes (idempotent)"""
     # In a real implementation, this would generate actual tokens
     # For now, we'll create a placeholder
     token_content = f"join-token-for-{cluster_name}"
-    
+
     secret_name = f"{cluster_name}-join-token"
-    
-    await create_secret(
-        secret_name,
-        namespace,
-        {
-            "token": token_content,
-        },
-    )
-    
-    return secret_name
+
+    # Check if secret already exists
+    try:
+        from kubernetes.client.rest import ApiException
+        from clients import core_v1
+
+        existing_secret = core_v1.read_namespaced_secret(secret_name, namespace)
+        logger.info(f"Join token secret {secret_name} already exists, reusing it")
+        return secret_name
+    except ApiException as e:
+        if e.status == 404:
+            # Secret doesn't exist, create it
+            await create_secret(
+                secret_name,
+                namespace,
+                {
+                    "token": token_content,
+                },
+            )
+            logger.info(f"Created join token secret: {secret_name}")
+            return secret_name
+        else:
+            # Other error, re-raise
+            raise
 
 
 async def create_nixos_configuration_for_machine(
@@ -229,6 +276,10 @@ async def create_nixos_configuration_for_machine(
         "additionalFiles": additional_files,
     }
 
+    # Add ref if specified
+    if cluster_spec.get("ref"):
+        nixos_config_spec["ref"] = cluster_spec["ref"]
+
     # Add credentials if specified
     if cluster_spec.get("credentialsRef"):
         nixos_config_spec["credentialsRef"] = cluster_spec["credentialsRef"]
@@ -261,12 +312,15 @@ async def reconcile_kubernetes_cluster(body, spec, name, namespace, **kwargs):
         if not cluster_uid:
             raise kopf.PermanentError("Cluster UID not found in metadata")
 
-        # Select machines for cluster roles
+        # Get current status to preserve previously selected machines
+        current_status = body.get("status", {})
+
+        # Select machines for cluster roles (passing status to preserve selection)
         control_plane_nodes = await select_machines_for_cluster(
-            spec, namespace, "controlPlane", name
+            spec, namespace, "controlPlane", name, current_status
         )
         worker_nodes = await select_machines_for_cluster(
-            spec, namespace, "dataPlane", name
+            spec, namespace, "dataPlane", name, current_status
         )
 
         if not control_plane_nodes:
@@ -287,28 +341,130 @@ async def reconcile_kubernetes_cluster(body, spec, name, namespace, **kwargs):
                 "ipAddress": machine["spec"].get("ipAddress", ""),
             }
 
-        # Track created configurations
+        # Track created/existing configurations
         applied_configs = {}
 
-        # Create configurations for control plane nodes
+        # Create configurations for control plane nodes (idempotent)
         for machine_name in control_plane_nodes:
-            config_name = await create_nixos_configuration_for_machine(
-                name, cluster_uid, machine_name, "control-plane", spec, namespace,
-                join_token_secret, control_plane_nodes, worker_nodes, machines_info
-            )
-            applied_configs[machine_name] = config_name
-            record_nixos_config_created(namespace, name, "control-plane")
+            config_name = f"{name}-{machine_name}"
 
-        # Create configurations for worker nodes
+            # Check if configuration already exists
+            try:
+                existing_config = get_nixos_configuration(config_name, namespace)
+                logger.info(f"NixosConfiguration {config_name} already exists, checking for updates")
+
+                # Check if gitRepo, ref, configurationSubdir, or credentialsRef changed
+                existing_spec = existing_config.get("spec", {})
+                spec_updates = {}
+
+                # Check gitRepo (required field)
+                if existing_spec.get("gitRepo") != spec.get("gitRepo"):
+                    spec_updates["gitRepo"] = spec["gitRepo"]
+                    logger.info(f"Detected gitRepo change for {config_name}: {existing_spec.get('gitRepo')} -> {spec['gitRepo']}")
+
+                # Check ref (optional field, support removal)
+                cluster_ref = spec.get("ref")
+                existing_ref = existing_spec.get("ref")
+                if cluster_ref != existing_ref:
+                    # Set to new value or None to remove the field
+                    spec_updates["ref"] = cluster_ref
+                    logger.info(f"Detected ref change for {config_name}: {existing_ref} -> {cluster_ref}")
+
+                # Check configurationSubdir (optional field)
+                cluster_subdir = spec.get("configurationSubdir", "")
+                existing_subdir = existing_spec.get("configurationSubdir", "")
+                if cluster_subdir != existing_subdir:
+                    spec_updates["configurationSubdir"] = cluster_subdir
+                    logger.info(f"Detected configurationSubdir change for {config_name}: {existing_subdir} -> {cluster_subdir}")
+
+                # Check credentialsRef (optional field, support removal)
+                cluster_creds = spec.get("credentialsRef")
+                existing_creds = existing_spec.get("credentialsRef")
+                if cluster_creds != existing_creds:
+                    # Set to new value or None to remove the field
+                    spec_updates["credentialsRef"] = cluster_creds
+                    logger.info(f"Detected credentialsRef change for {config_name}: {existing_creds} -> {cluster_creds}")
+
+                # Apply updates if any changes detected
+                if spec_updates:
+                    await patch_nixos_configuration_spec(config_name, namespace, spec_updates)
+                    logger.info(f"Updated NixosConfiguration {config_name} with spec changes")
+
+                applied_configs[machine_name] = config_name
+            except Exception as e:
+                # Config doesn't exist, create it
+                if "404" in str(e) or "not found" in str(e).lower():
+                    config_name = await create_nixos_configuration_for_machine(
+                        name, cluster_uid, machine_name, "control-plane", spec, namespace,
+                        join_token_secret, control_plane_nodes, worker_nodes, machines_info
+                    )
+                    applied_configs[machine_name] = config_name
+                    record_nixos_config_created(namespace, name, "control-plane")
+                else:
+                    # Some other error, re-raise
+                    raise
+
+        # Create configurations for worker nodes (idempotent)
         for machine_name in worker_nodes:
-            config_name = await create_nixos_configuration_for_machine(
-                name, cluster_uid, machine_name, "worker", spec, namespace,
-                join_token_secret, control_plane_nodes, worker_nodes, machines_info
-            )
-            applied_configs[machine_name] = config_name
-            record_nixos_config_created(namespace, name, "worker")
+            config_name = f"{name}-{machine_name}"
+
+            # Check if configuration already exists
+            try:
+                existing_config = get_nixos_configuration(config_name, namespace)
+                logger.info(f"NixosConfiguration {config_name} already exists, checking for updates")
+
+                # Check if gitRepo, ref, configurationSubdir, or credentialsRef changed
+                existing_spec = existing_config.get("spec", {})
+                spec_updates = {}
+
+                # Check gitRepo (required field)
+                if existing_spec.get("gitRepo") != spec.get("gitRepo"):
+                    spec_updates["gitRepo"] = spec["gitRepo"]
+                    logger.info(f"Detected gitRepo change for {config_name}: {existing_spec.get('gitRepo')} -> {spec['gitRepo']}")
+
+                # Check ref (optional field, support removal)
+                cluster_ref = spec.get("ref")
+                existing_ref = existing_spec.get("ref")
+                if cluster_ref != existing_ref:
+                    # Set to new value or None to remove the field
+                    spec_updates["ref"] = cluster_ref
+                    logger.info(f"Detected ref change for {config_name}: {existing_ref} -> {cluster_ref}")
+
+                # Check configurationSubdir (optional field)
+                cluster_subdir = spec.get("configurationSubdir", "")
+                existing_subdir = existing_spec.get("configurationSubdir", "")
+                if cluster_subdir != existing_subdir:
+                    spec_updates["configurationSubdir"] = cluster_subdir
+                    logger.info(f"Detected configurationSubdir change for {config_name}: {existing_subdir} -> {cluster_subdir}")
+
+                # Check credentialsRef (optional field, support removal)
+                cluster_creds = spec.get("credentialsRef")
+                existing_creds = existing_spec.get("credentialsRef")
+                if cluster_creds != existing_creds:
+                    # Set to new value or None to remove the field
+                    spec_updates["credentialsRef"] = cluster_creds
+                    logger.info(f"Detected credentialsRef change for {config_name}: {existing_creds} -> {cluster_creds}")
+
+                # Apply updates if any changes detected
+                if spec_updates:
+                    await patch_nixos_configuration_spec(config_name, namespace, spec_updates)
+                    logger.info(f"Updated NixosConfiguration {config_name} with spec changes")
+
+                applied_configs[machine_name] = config_name
+            except Exception as e:
+                # Config doesn't exist, create it
+                if "404" in str(e) or "not found" in str(e).lower():
+                    config_name = await create_nixos_configuration_for_machine(
+                        name, cluster_uid, machine_name, "worker", spec, namespace,
+                        join_token_secret, control_plane_nodes, worker_nodes, machines_info
+                    )
+                    applied_configs[machine_name] = config_name
+                    record_nixos_config_created(namespace, name, "worker")
+                else:
+                    # Some other error, re-raise
+                    raise
         
-        # Update cluster status
+        # Update cluster status (including persisted machine selection)
         await update_cluster_status(
             name,
             namespace,
@@ -318,6 +474,9 @@ async def reconcile_kubernetes_cluster(body, spec, name, namespace, **kwargs):
                 "dataPlaneReady": f"0/{len(worker_nodes)}",
                 "kubeconfigSecret": f"{name}-kubeconfig",  # Will be created later
                 "appliedMachines": applied_configs,
+                # Persist selected machines to ensure stable first control plane node
+                "selectedControlPlaneMachines": control_plane_nodes,
+                "selectedDataPlaneMachines": worker_nodes,
                 "conditions": [
                     {
                         "type": "Provisioning",
